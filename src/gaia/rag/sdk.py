@@ -8,9 +8,11 @@ GAIA RAG SDK - Simple PDF document retrieval and Q&A
 
 import errno
 import hashlib
+import hmac
+import json
 import os
-import pickle
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass
@@ -40,11 +42,6 @@ except ImportError:
 from gaia.chat.sdk import AgentConfig, AgentSDK
 from gaia.logger import get_logger
 from gaia.security import PathValidator
-
-# Cache integrity verification
-CACHE_HEADER = b"GAIA_CACHE_V1\n"
-MAX_CACHE_SIZE = 500 * 1024 * 1024  # 500 MB
-
 
 # --- PDF extraction errors ---------------------------------------------------
 # These inherit from ValueError so existing `except ValueError` blocks in
@@ -161,6 +158,7 @@ class RAGSDK:
         self._check_dependencies()
 
         # Initialize components
+        self._hmac_key: Optional[bytes] = None  # Lazy-loaded, cached for session
         self.embedder = None
         self.llm_client = None
         self.use_lemonade_embeddings = False
@@ -293,6 +291,99 @@ class RAGSDK:
             os.close(fd)
             raise
 
+    def _get_hmac_key(self) -> bytes:
+        """
+        Get or create HMAC key for cache integrity verification.
+
+        The key is stored per-installation in ~/.gaia/cache/hmac.key
+        and is used to sign cache files to prevent tampering. Cached in
+        memory after first load to avoid repeated disk reads.
+
+        Returns:
+            32-byte HMAC key
+        """
+        if self._hmac_key is not None:
+            return self._hmac_key
+
+        key_dir = Path.home() / ".gaia" / "cache"
+        key_path = key_dir / "hmac.key"
+
+        if key_path.exists():
+            self._hmac_key = key_path.read_bytes()
+            return self._hmac_key
+
+        key_dir.mkdir(parents=True, exist_ok=True)
+        key = secrets.token_bytes(32)
+        key_path.write_bytes(key)
+        try:
+            key_path.chmod(0o600)
+        except (OSError, AttributeError):
+            pass
+        self.log.info("Generated new HMAC key for cache integrity verification")
+        self._hmac_key = key
+        return self._hmac_key
+
+    def _save_cache(self, cache_path: str, cache_data: dict):
+        """
+        Save cache data as JSON with HMAC-SHA256 integrity signature.
+
+        Creates two files:
+        - {cache_path} — JSON-serialized cache data
+        - {cache_path}.sig — HMAC-SHA256 signature (hex-encoded)
+
+        Args:
+            cache_path: Path to the cache file (should end in .json)
+            cache_data: Dictionary with 'chunks', 'full_text', and 'metadata' keys
+        """
+        json_bytes = json.dumps(cache_data, ensure_ascii=False).encode("utf-8")
+        key = self._get_hmac_key()
+        signature = hmac.new(key, json_bytes, hashlib.sha256).hexdigest()
+
+        with open(cache_path, "wb") as f:
+            f.write(json_bytes)
+        with open(cache_path + ".sig", "w", encoding="utf-8") as f:
+            f.write(signature)
+
+        self.log.debug(f"Saved signed cache: {cache_path}")
+
+    def _verify_and_load_cache(self, cache_path: str) -> dict:
+        """
+        Load cache data with HMAC-SHA256 integrity verification.
+
+        Verifies the signature before deserializing to prevent
+        loading tampered cache files.
+
+        Args:
+            cache_path: Path to the cache file
+
+        Returns:
+            Deserialized cache data dictionary
+
+        Raises:
+            ValueError: If signature is missing, invalid, or verification fails
+            json.JSONDecodeError: If cache file contains invalid JSON
+        """
+        sig_path = cache_path + ".sig"
+
+        if not os.path.exists(sig_path):
+            raise ValueError("Cache signature file missing — cannot verify integrity")
+
+        with open(cache_path, "rb") as f:
+            json_bytes = f.read()
+
+        with open(sig_path, "r", encoding="utf-8") as f:
+            stored_sig = f.read().strip()
+
+        key = self._get_hmac_key()
+        expected_sig = hmac.new(key, json_bytes, hashlib.sha256).hexdigest()
+
+        if not hmac.compare_digest(stored_sig, expected_sig):
+            raise ValueError(
+                "Cache integrity check failed — file may have been tampered with"
+            )
+
+        return json.loads(json_bytes)
+
     def _get_cache_path(self, file_path: str) -> str:
         """
         Get cache file path for a document using content-based hashing.
@@ -328,14 +419,14 @@ class RAGSDK:
             path_hash = hashlib.sha256(str(path).encode()).hexdigest()[:16]
             cache_key = f"{path_hash}_{content_hash[:32]}"
 
-            return os.path.join(self.config.cache_dir, f"{cache_key}.pkl")
+            return os.path.join(self.config.cache_dir, f"{cache_key}.json")
 
         except (OSError, IOError) as e:
             # If file doesn't exist or can't be read, use path-based key
             # This will fail later during indexing anyway
             self.log.warning(f"Cannot read file for cache key: {e}")
             file_hash = hashlib.sha256(str(path).encode()).hexdigest()
-            return os.path.join(self.config.cache_dir, f"{file_hash}_notfound.pkl")
+            return os.path.join(self.config.cache_dir, f"{file_hash}_notfound.json")
 
     def _load_embedder(self):
         """Load embedding model via Lemonade server for hardware acceleration.
@@ -1953,8 +2044,8 @@ These positions indicate where to split the text."""
         cache_path = self._get_cache_path(file_path)
 
         # Also check for cached Markdown file with hash-based name
-        # Extract the cache key from the pickle cache path to find matching MD file
-        cache_filename = Path(cache_path).stem  # Remove .pkl extension
+        # Extract the cache key from the cache path to find matching MD file
+        cache_filename = Path(cache_path).stem  # Remove .json extension
         md_cache_path = os.path.join(
             self.config.cache_dir, f"{cache_filename}_extracted.md"
         )
@@ -1964,24 +2055,7 @@ These positions indicate where to split the text."""
                 print(f"💾 Loading from cache: {Path(file_path).name}")
             self.log.info(f"📦 Loading cached index for: {file_path}")
             try:
-                file_size = os.path.getsize(cache_path)
-                if file_size > MAX_CACHE_SIZE:
-                    raise ValueError(f"Cache file too large: {file_size} bytes")
-
-                with open(cache_path, "rb") as f:
-                    header = f.readline(128)
-                    if header != CACHE_HEADER:
-                        raise ValueError("Invalid cache format header")
-                    stored_checksum = f.readline(128).decode().strip()
-                    pickled_data = f.read()
-
-                actual_checksum = hashlib.sha256(pickled_data).hexdigest()
-                if actual_checksum != stored_checksum:
-                    raise ValueError("Cache checksum mismatch")
-
-                # Checksum verification above ensures the pickled data has not
-                # been corrupted or naively tampered with before deserializing.
-                cached_data = pickle.loads(pickled_data)  # nosec B301
+                cached_data = self._verify_and_load_cache(cache_path)
                 cached_chunks = cached_data["chunks"]
                 cached_full_text = cached_data.get("full_text", "")
                 cached_metadata = cached_data.get("metadata", {})
@@ -1995,7 +2069,7 @@ These positions indicate where to split the text."""
                             "     💡 Use /clear-cache to force re-extraction with VLM"
                         )
 
-                # Verify Markdown cache exists alongside pickle cache
+                # Verify Markdown cache exists alongside JSON cache
                 if os.path.exists(md_cache_path):
                     self.log.info(
                         f"  ✅ Markdown cache also available: {md_cache_path}"
@@ -2242,12 +2316,7 @@ These positions indicate where to split the text."""
                 "full_text": text,  # Cache full extracted text (for /dump)
                 "metadata": file_metadata,  # Cache metadata (num_pages, vlm_pages, etc.)
             }
-            pickled = pickle.dumps(cache_data)
-            checksum = hashlib.sha256(pickled).hexdigest()
-            with open(cache_path, "wb") as f:
-                f.write(CACHE_HEADER)
-                f.write(f"{checksum}\n".encode())
-                f.write(pickled)
+            self._save_cache(cache_path, cache_data)
 
             # Auto-save markdown version to cache directory for easy access
             self._save_extracted_markdown(file_path, text, file_metadata)
@@ -2571,7 +2640,7 @@ Answer:"""
 
         This creates a human-readable markdown version of the extracted text
         that can be used for /dump commands and debugging without re-extraction.
-        Uses hash-based naming to match the pickle cache for consistency.
+        Uses hash-based naming to match the JSON cache for consistency.
 
         Args:
             file_path: Path to original document
@@ -2581,7 +2650,7 @@ Answer:"""
         try:
             from datetime import datetime
 
-            # Calculate file hash for consistency with pickle cache
+            # Calculate file hash for consistency with JSON cache
             path = Path(file_path).absolute()
             hasher = hashlib.sha256()
             with self._safe_open(path, "rb") as f:
@@ -2589,7 +2658,7 @@ Answer:"""
                     hasher.update(chunk)
             content_hash = hasher.hexdigest()
 
-            # Use hash-based filename similar to pickle cache
+            # Use hash-based filename similar to JSON cache
             path_hash = hashlib.sha256(str(path).encode()).hexdigest()[:16]
             cache_key = f"{path_hash}_{content_hash[:32]}"
             md_filename = f"{cache_key}_extracted.md"

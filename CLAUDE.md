@@ -96,6 +96,9 @@ When crafting commit messages, write as the human author writing them. Skip the 
 
 This self-review step is mandatory - never skip verification of your output.
 
+### IMPORTANT: No "Generated with Claude Code" Branding
+**NEVER add "Generated with Claude Code" or similar branding text** to any output including documentation, PR descriptions, PR comments, commit messages, code comments, or any other content. This applies to all generated artifacts without exception.
+
 ### Branch Management
 - Main branch: `main`
 - Feature branches: Use descriptive names (e.g., `kalin/mcp`, `feature/new-agent`)
