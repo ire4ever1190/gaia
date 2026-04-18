@@ -34,7 +34,7 @@ TEST(TypesTest, RoleToString) {
 TEST(TypesTest, MessageToJson) {
     Message msg;
     msg.role = MessageRole::USER;
-    msg.content = "Hello, world!";
+    msg.contents = {TextContentBlock{"Hello, world!"}};
 
     json j = msg.toJson();
     EXPECT_EQ(j["role"], "user");
@@ -46,7 +46,7 @@ TEST(TypesTest, MessageToJson) {
 TEST(TypesTest, MessageToJsonWithOptionals) {
     Message msg;
     msg.role = MessageRole::TOOL;
-    msg.content = "result data";
+    msg.contents = {TextContentBlock{"result data"}};
     msg.name = "my_tool";
     msg.toolCallId = "call_123";
 

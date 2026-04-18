@@ -57,6 +57,14 @@ public:
     /// @return JSON result with "result" key containing the final answer
     json processQuery(const std::string& userInput, int maxSteps = 0);
 
+    /// Processes a list of messages.
+    /// This allows sending multiple messages or different messages types (e.g. images)
+    ///
+    /// @param contents Series of messages to send to the agent
+    /// @param maxSteps Override max steps (0 = use config default)
+    /// @return JSON result with "result" key containing the final answer
+    json processQuery(const std::vector<MessageContent>& contents, int maxSteps = 0);
+
     /// Connect to an MCP server and register its tools.
     /// Mirrors Python MCPClientMixin.connect_mcp_server().
     ///

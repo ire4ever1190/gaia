@@ -3,11 +3,13 @@
 
 #include "gaia/agent.h"
 #include "gaia/security.h"
+#include "gaia/types.h"
 
 #include <iostream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <type_traits>
 
 namespace gaia {
 
@@ -524,6 +526,10 @@ void Agent::disconnectAllMcp() {
 // ---- Main Execution Loop ----
 
 json Agent::processQuery(const std::string& userInput, int maxSteps) {
+    return this->processQuery({TextContentBlock{userInput}}, maxSteps);
+}
+
+json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSteps) {
     // Snapshot config at start of query for thread-safe consistency throughout.
     AgentConfig cfg;
     {
@@ -562,10 +568,24 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
     // Add user message
     Message userMsg;
     userMsg.role = MessageRole::USER;
-    userMsg.content = userInput;
+    userMsg.contents = contents;
     messages.push_back(userMsg);
 
-    console_->printProcessingStart(userInput, stepsLimit, cfg.modelId);
+    // Create a message of what we are processing
+    std::string consoleMsg;
+    for (const auto& content: contents) {
+        consoleMsg += std::visit([](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, TextContentBlock>) {
+                return arg.content;
+            } else if constexpr (std::is_same_v<T, ImageURLContentBlock>) {
+                return "image: " + arg.image_url;
+            } else {
+                static_assert(false, "Console message is not exhaustive");
+            }
+        }, content) + "\n";
+    }
+    console_->printProcessingStart(consoleMsg, stepsLimit, cfg.modelId);
 
     int stepsTaken = 0;
     std::string finalAnswer;
@@ -584,12 +604,20 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
 
             Message errorMsg;
             errorMsg.role = MessageRole::USER;
-            errorMsg.content =
+            std::vector<MessageContent> errorContents;
+            // Notify it failed
+            errorContents.push_back(TextContentBlock{
                 "TOOL EXECUTION FAILED!\n\n"
                 "Error: " + lastError + "\n\n"
-                "Original task: " + userInput + "\n\n"
-                "Please analyze the error and try an alternative approach.\n"
-                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})";
+                "Original tasks:"
+                });
+            // Give contenxt for what it was doing
+            errorContents.insert(errorContents.end(), contents.begin(), contents.end());
+            // And what we expect
+            errorContents.push_back(TextContentBlock{
+                "\n\nPlease analyze the error and try an alternative approach.\n"
+                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})"
+            });
             messages.push_back(errorMsg);
 
             executionState_ = AgentState::PLANNING;
@@ -627,7 +655,7 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
         // Add LLM response to messages
         Message assistantMsg;
         assistantMsg.role = MessageRole::ASSISTANT;
-        assistantMsg.content = response;
+        assistantMsg.contents = {TextContentBlock{response}};
         messages.push_back(assistantMsg);
 
         // Parse response
@@ -654,9 +682,10 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
             if (planIterations_ > cfg.maxPlanIterations) {
                 Message forceMsg;
                 forceMsg.role = MessageRole::USER;
-                forceMsg.content =
+                forceMsg.contents = {TextContentBlock{
                     "You have been planning too long without completing the task. "
-                    "Please provide a final answer now based on the information you have gathered.";
+                    "Please provide a final answer now based on the information you have gathered."
+                }};
                 messages.push_back(forceMsg);
             }
         }
@@ -710,7 +739,7 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
                 resultStr = resultStr.substr(0, 2000) + "\n...[truncated]...\n" +
                             resultStr.substr(resultStr.size() - 1500);
             }
-            toolMsg.content = resultStr;
+            toolMsg.contents = {TextContentBlock{resultStr}};
             messages.push_back(toolMsg);
 
             // Check for error
@@ -748,7 +777,11 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
         if (msg.role == MessageRole::TOOL) {
             std::string toolName = msg.name.value_or("tool");
             msg.role = MessageRole::USER;
-            msg.content = "[Result from " + toolName + "]: " + msg.content;
+            std::vector<MessageContent> resultContents = {
+                TextContentBlock{"[Result from " + toolName + "]"}
+            };
+            resultContents.insert(resultContents.end(), contents.begin(), contents.end());
+            msg.contents = resultContents;
             msg.name = std::nullopt;
             msg.toolCallId = std::nullopt;
         }
