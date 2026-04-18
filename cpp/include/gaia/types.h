@@ -13,6 +13,7 @@
 #include <string>
 #include <variant>
 #include <vector>
+#include <variant>
 
 #include <nlohmann/json.hpp>
 
@@ -61,16 +62,45 @@ inline std::string roleToString(MessageRole r) {
     return "unknown";
 }
 
+struct TextContentBlock {
+    std::string content;
+
+    json toJson() const {
+        json c;
+        c["type"] = "text";
+        c["content"] = content;
+        return c;
+    }
+};
+
+struct ImageURLContentBlock {
+    std::string image_url;
+
+    json toJson() const {
+        json c;
+        c["type"] = "image_url";
+        c["content"] = image_url;
+        return c;
+    }
+};
+
+typedef std::variant<TextContentBlock, ImageURLContentBlock> MessageContent;
+
 struct Message {
     MessageRole role;
-    std::string content;
+    std::vector<MessageContent> contents;
     std::optional<std::string> name;       // Tool name (for role=TOOL)
     std::optional<std::string> toolCallId; // Tool call ID (for role=TOOL)
 
     json toJson() const {
         json j;
         j["role"] = roleToString(role);
-        j["content"] = content;
+        j["content"] = json::array();
+        for (const auto& content: contents) {
+            j["content"].push_back(std::visit([](auto&& block) {
+                return block.toJson();
+            }, content));
+        }
         if (name.has_value()) j["name"] = name.value();
         if (toolCallId.has_value()) j["tool_call_id"] = toolCallId.value();
         return j;
