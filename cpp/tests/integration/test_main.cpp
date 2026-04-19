@@ -52,11 +52,11 @@ struct MenuItem {
 };
 
 static const MenuItem kTestMenu[] = {
-    {"LLM tests",    "basic chat, tool calling, multi-step, system prompt  (5 tests)",  kFilterLLM},
+    {"LLM tests",    "basic chat, tool calling, multi-step, multimodal, system prompt  (9 tests)",  kFilterLLM},
     {"MCP tests",    "connection, tool discovery, reconnect, prompt rebuild  (5 tests)", kFilterMCP},
     {"WiFi tests",   "real PowerShell diagnostics + LLM reasoning  (4 tests)",          kFilterWiFi},
     {"Health tests", "LLM + MCP + real PowerShell system health  (3 tests)",            kFilterHealth},
-    {"All tests",    "run everything  (17 tests)",                                      kFilterAll},
+    {"All tests",    "run everything  (21 tests)",                                      kFilterAll},
 };
 static constexpr size_t kMenuSize = sizeof(kTestMenu) / sizeof(kTestMenu[0]);
 

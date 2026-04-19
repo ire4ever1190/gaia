@@ -189,6 +189,112 @@ TEST(LLMIntegrationTest, CustomSystemPrompt) {
 // Test 5: AgentConfig - silentMode, maxSteps enforced
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Test 6: Multimodal query with text-only content blocks
+// ---------------------------------------------------------------------------
+
+class MultimodalTextAgent : public gaia::Agent {
+public:
+    MultimodalTextAgent() : Agent(baseConfig(3)) { init(); }
+protected:
+    std::string getSystemPrompt() const override {
+        return "You are a minimal test assistant. Answer exactly as instructed.";
+    }
+};
+
+TEST(LLMIntegrationTest, MultimodalTextOnlyQuery) {
+    MultimodalTextAgent agent;
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"Reply with the single word: multimodal_pong"}
+        }
+    );
+
+    ASSERT_TRUE(result.contains("result")) << "Result key missing";
+    std::string answer = result["result"].get<std::string>();
+    EXPECT_FALSE(answer.empty()) << "Expected non-empty response";
+    EXPECT_NE(toLower(answer).find("multimodal"), std::string::npos)
+        << "Expected 'multimodal' in response, got: " << answer;
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Multimodal query with image URL
+// ---------------------------------------------------------------------------
+
+class VisionAgent : public gaia::Agent {
+public:
+    VisionAgent() : Agent(baseConfig(5)) { init(); }
+protected:
+    std::string getSystemPrompt() const override {
+        return "You are a vision assistant. Describe what you see in images briefly.";
+    }
+};
+
+TEST(LLMIntegrationTest, MultimodalImageQuery) {
+    VisionAgent agent;
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"What do you see in this image? Reply with a short description."},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+            }}
+        }
+    );
+
+    ASSERT_TRUE(result.contains("result")) << "Result key missing";
+    std::string answer = result["result"].get<std::string>();
+    EXPECT_FALSE(answer.empty()) << "Expected non-empty response from vision query";
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Multimodal query with image detail parameter
+// ---------------------------------------------------------------------------
+
+TEST(LLMIntegrationTest, MultimodalImageWithDetail) {
+    VisionAgent agent;
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"Describe this image in one sentence."},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
+                "low"
+            }}
+        }
+    );
+
+    ASSERT_TRUE(result.contains("result")) << "Result key missing";
+    std::string answer = result["result"].get<std::string>();
+    EXPECT_FALSE(answer.empty()) << "Expected non-empty response from vision query with detail";
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Multimodal query with multiple images
+// ---------------------------------------------------------------------------
+
+TEST(LLMIntegrationTest, MultimodalMultipleImages) {
+    VisionAgent agent;
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"How many images did I send? Just reply with the number."},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png"
+            }},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png",
+                "high"
+            }}
+        }
+    );
+
+    ASSERT_TRUE(result.contains("result")) << "Result key missing";
+    std::string answer = result["result"].get<std::string>();
+    EXPECT_FALSE(answer.empty()) << "Expected non-empty response from multi-image query";
+}
+
+// ---------------------------------------------------------------------------
+// Test 10: AgentConfig - silentMode, maxSteps enforced
+// ---------------------------------------------------------------------------
+
 TEST(LLMIntegrationTest, MaxStepsEnforced) {
     // Set maxSteps=1 so the agent cannot complete a multi-step plan
     gaia::AgentConfig cfg = baseConfig(1);
