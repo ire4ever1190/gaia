@@ -63,12 +63,12 @@ inline std::string roleToString(MessageRole r) {
 }
 
 struct TextContentBlock {
-    std::string content;
+    std::string text;
 
     json toJson() const {
         json c;
         c["type"] = "text";
-        c["text"] = content;
+        c["text"] = text;
         return c;
     }
 };

@@ -577,7 +577,7 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         consoleMsg += std::visit([](auto&& arg) {
             using T = std::decay_t<decltype(arg)>;
             if constexpr (std::is_same_v<T, TextContentBlock>) {
-                return arg.content;
+                return arg.text;
             } else if constexpr (std::is_same_v<T, ImageURLContentBlock>) {
                 return "image: " + arg.imageUrl.url;
             } else {
