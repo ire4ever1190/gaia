@@ -24,6 +24,7 @@ The GAIA C++17 framework is a native implementation of the core agent system. It
 **What it provides:**
 
 - Agent execution loop with state machine (planning, tool execution, error recovery, completion)
+- Multimodal queries — send text, images, or mixed content to vision-capable models
 - Tool registry with `registerTool()` for defining agent capabilities
 - MCP client with cross-platform stdio transport
 - JSON response parsing with multi-strategy fallback (code-block extraction, bracket matching, syntax fixing)
@@ -215,6 +216,65 @@ int main() {
 }
 ```
 
+### Multimodal Queries
+
+To send images or mixed content to a vision-capable model, use the `processQuery(vector<MessageContent>)` overload:
+
+```cpp
+#include <gaia/agent.h>
+#include <gaia/types.h>
+
+class VisionAgent : public gaia::Agent {
+public:
+    VisionAgent() : Agent(makeConfig()) { init(); }
+
+protected:
+    std::string getSystemPrompt() const override {
+        return "You are a vision assistant. Describe images clearly and concisely.";
+    }
+
+private:
+    static gaia::AgentConfig makeConfig() {
+        gaia::AgentConfig cfg;
+        cfg.modelId = "Gemma-4-E4B-it-GGUF";  // vision-capable model
+        return cfg;
+    }
+};
+
+int main() {
+    VisionAgent agent;
+
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"What do you see in this image?"},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://example.com/photo.jpg"
+            }}
+        }
+    );
+
+    std::cout << result["result"].get<std::string>() << std::endl;
+}
+```
+
+<Note>
+**Model requirement:** Multimodal queries require a vision-capable model (e.g., Gemma-4, Qwen3-VL). Text-only models will return an error when receiving image content.
+</Note>
+
+The content types available:
+
+| Type | Header | Description |
+|------|--------|-------------|
+| `TextContentBlock` | `<gaia/types.h>` | Plain text content |
+| `ImageURLContentBlock` | `<gaia/types.h>` | Image from a URL, with optional `detail` setting (`"auto"`, `"low"`, `"high"`) |
+
+```cpp
+// Image with high-detail processing
+gaia::ImageURLContentBlock{gaia::ImageURL{
+    "https://example.com/chart.png", "high"
+}}
+```
+
 <Note>
 **Why `init()` in the constructor?** C++ virtual dispatch does not work from base-class constructors. Calling `init()` at the end of your subclass constructor ensures `registerTools()` and `getSystemPrompt()` resolve to your overrides.
 </Note>
@@ -268,7 +328,7 @@ cpp/
   CMakeLists.txt            # Build config (fetches all dependencies)
   include/gaia/
     agent.h                 # Core Agent class (processQuery, MCP connect)
-    types.h                 # AgentConfig, Message, ToolInfo, ParsedResponse
+    types.h                 # AgentConfig, Message, MessageContent, ImageURL, ToolInfo, ParsedResponse
     tool_registry.h         # Tool registration and execution
     mcp_client.h            # MCP JSON-RPC client (stdio transport)
     json_utils.h            # JSON extraction with multi-strategy fallback
@@ -314,6 +374,7 @@ cpp/
 | MCP client (stdio) | Yes | Yes |
 | JSON parsing with fallbacks | Yes | Yes |
 | OpenAI-compatible LLM backend | Yes | Yes |
+| Multimodal queries (text + images) | Yes | Yes |
 | Multiple LLM providers (Claude, OpenAI) | Yes | Planned |
 | Specialized agents (Code, Docker, Jira) | Yes | — |
 | REST API server | Yes | — |

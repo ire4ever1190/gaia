@@ -1,6 +1,6 @@
 ---
 title: "Custom Agent"
-description: "Step-by-step walkthrough: custom system prompts, typed tool parameters, MCP server connections, output capture, and AgentConfig tuning"
+description: "Step-by-step walkthrough: custom system prompts, typed tool parameters, MCP server connections, multimodal queries, output capture, and AgentConfig tuning"
 icon: "sliders"
 ---
 
@@ -313,7 +313,91 @@ int main() {
 
 ---
 
-## Step 5 — Tune AgentConfig
+## Step 5 — Multimodal Queries (Text + Images)
+
+Agents can process images alongside text when using a vision-capable model. Use the `processQuery(vector<MessageContent>)` overload to send mixed content:
+
+```cpp
+#include <gaia/agent.h>
+#include <gaia/types.h>
+
+class ImageAnalyzer : public gaia::Agent {
+public:
+    ImageAnalyzer() : Agent(makeConfig()) { init(); }
+
+protected:
+    std::string getSystemPrompt() const override {
+        return "You are an image analysis assistant. "
+               "Describe what you see clearly and concisely. "
+               "Report any text visible in the image verbatim.";
+    }
+
+private:
+    static gaia::AgentConfig makeConfig() {
+        gaia::AgentConfig cfg;
+        cfg.modelId = "Gemma-4-E4B-it-GGUF";  // vision-capable model required
+        return cfg;
+    }
+};
+
+int main() {
+    ImageAnalyzer agent;
+
+    // Single image with a text prompt
+    auto result = agent.processQuery(
+        std::vector<gaia::MessageContent>{
+            gaia::TextContentBlock{"Describe this image in detail."},
+            gaia::ImageURLContentBlock{gaia::ImageURL{
+                "https://example.com/photo.jpg"
+            }}
+        }
+    );
+    std::cout << result["result"].get<std::string>() << std::endl;
+}
+```
+
+### Image Detail Levels
+
+Control how the model processes images with the optional `detail` field:
+
+```cpp
+// Low detail — faster, less token consumption
+gaia::ImageURL{"https://example.com/chart.png", "low"}
+
+// High detail — thorough analysis
+gaia::ImageURL{"https://example.com/diagram.png", "high"}
+
+// Default (no detail specified) — equivalent to "auto"
+gaia::ImageURL{"https://example.com/photo.jpg"}
+```
+
+| Value | Behavior |
+|-------|----------|
+| `"auto"` | Model decides based on image size |
+| `"low"` | Low-resolution processing — faster, fewer tokens |
+| `"high"` | Full-resolution analysis — most detail |
+
+### Multiple Images
+
+Send multiple images in a single query:
+
+```cpp
+auto result = agent.processQuery(
+    std::vector<gaia::MessageContent>{
+        gaia::TextContentBlock{"Compare these two images. What are the differences?"},
+        gaia::ImageURLContentBlock{gaia::ImageURL{"https://example.com/before.png", "high"}},
+        gaia::ImageURLContentBlock{gaia::ImageURL{"https://example.com/after.png", "high"}}
+    }
+);
+```
+
+<Note>
+**Vision-capable models** such as Gemma-4 or Qwen3-VL are required for image processing. Text-only models will return an error when receiving image content. Use `TextContentBlock` alone if you want the array-form API without images.
+</Note>
+
+---
+
+## Step 6 — Tune AgentConfig
 
 Adjust `AgentConfig` in your `makeConfig()` static method to match your use case:
 
@@ -351,7 +435,7 @@ static gaia::AgentConfig makeConfig() {
 
 ---
 
-## Step 6 — Capture Output Programmatically
+## Step 7 — Capture Output Programmatically
 
 By default the agent prints to the terminal using `TerminalConsole`. You can replace it with `SilentConsole` (built-in) or a fully custom `OutputHandler` subclass.
 
@@ -441,7 +525,7 @@ std::cout << consolePtr->finalAnswer() << "\n";
 
 ---
 
-## Step 7 — Embedding in Your Application
+## Step 8 — Embedding in Your Application
 
 When integrating the agent into a desktop application (WPF, Qt, Electron), you need to run it headless, capture its output programmatically, and keep your UI responsive.
 
@@ -752,6 +836,7 @@ target_link_libraries(my_custom_agent PRIVATE gaia::gaia_core)
 | Persona, constraints, output format | `getSystemPrompt()` | Injected before tool list |
 | Native C++ tools | `registerTools()` via `toolRegistry().registerTool()` | Typed params improve LLM tool-calling accuracy |
 | External MCP server tools | `connectMcpServer()` after `init()` | Prefixed as `mcp_<server>_<tool>` |
+| Text + image queries | `processQuery(vector<MessageContent>)` | Requires vision-capable model |
 | Step limits, replanning, debug verbosity | `AgentConfig` in `makeConfig()` | Tune per use-case |
 | Console output routing | `setOutputHandler()` | Call before or after `init()` |
 

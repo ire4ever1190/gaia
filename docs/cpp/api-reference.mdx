@@ -274,6 +274,9 @@ public:
     // Main execution — blocking, returns {"result": "...", "steps_taken": N}
     json processQuery(const std::string& userInput, int maxSteps = 0);
 
+    // Multimodal execution — send text + images to vision-capable models
+    json processQuery(const std::vector<MessageContent>& contents, int maxSteps = 0);
+
     // MCP server management
     bool connectMcpServer(const std::string& name, const json& config);
     void disconnectMcpServer(const std::string& name);
@@ -297,6 +300,31 @@ protected:
     void init();  // call at end of subclass constructor
 };
 ```
+
+### Content Types
+
+Multimodal queries use `MessageContent` — a `std::variant` that holds either text or image content blocks:
+
+```cpp
+// Text content
+gaia::TextContentBlock{"Describe this image"}
+
+// Image from URL
+gaia::ImageURLContentBlock{gaia::ImageURL{"https://example.com/photo.jpg"}}
+
+// Image with detail level ("auto", "low", or "high")
+gaia::ImageURLContentBlock{gaia::ImageURL{"https://example.com/photo.jpg", "high"}}
+```
+
+| Type | Field | Description |
+|------|-------|-------------|
+| `TextContentBlock` | `std::string text` | Plain text content |
+| `ImageURL` | `std::string url` | Image URL |
+| `ImageURL` | `std::optional<std::string> detail` | Detail level: `"auto"`, `"low"`, or `"high"`. Omitted from JSON when not set |
+| `ImageURLContentBlock` | `ImageURL imageUrl` | Wraps an `ImageURL` for use in `MessageContent` |
+| `MessageContent` | `variant<TextContentBlock, ImageURLContentBlock>` | A single content block in a multimodal message |
+
+Both overloads of `processQuery()` share the same agent loop, error recovery, and tool execution. The string overload sends `"content": "text"` to the LLM; the multimodal overload sends `"content": [{"type": "text", ...}, {"type": "image_url", ...}]`.
 
 ### ToolRegistry
 
