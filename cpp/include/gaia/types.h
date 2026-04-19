@@ -68,18 +68,24 @@ struct TextContentBlock {
     json toJson() const {
         json c;
         c["type"] = "text";
-        c["content"] = content;
+        c["text"] = content;
         return c;
     }
 };
 
+struct ImageURL {
+    std::string url;
+};
+
 struct ImageURLContentBlock {
-    std::string image_url;
+    ImageURL imageUrl;
 
     json toJson() const {
         json c;
         c["type"] = "image_url";
-        c["content"] = image_url;
+        json inner;
+        inner["url"] = imageUrl.url;
+        c["image_url"] = inner;
         return c;
     }
 };

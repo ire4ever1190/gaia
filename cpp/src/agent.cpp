@@ -579,7 +579,7 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
             if constexpr (std::is_same_v<T, TextContentBlock>) {
                 return arg.content;
             } else if constexpr (std::is_same_v<T, ImageURLContentBlock>) {
-                return "image: " + arg.image_url;
+                return "image: " + arg.imageUrl.url;
             } else {
                 static_assert(false, "Console message is not exhaustive");
             }
