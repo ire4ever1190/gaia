@@ -34,7 +34,7 @@ TEST(TypesTest, RoleToString) {
 TEST(TypesTest, MessageToJson) {
     Message msg;
     msg.role = MessageRole::USER;
-    msg.contents = {TextContentBlock{"Hello, world!"}};
+    msg.content = "Hello, world!";
 
     json j = msg.toJson();
     EXPECT_EQ(j["role"], "user");
@@ -46,7 +46,7 @@ TEST(TypesTest, MessageToJson) {
 TEST(TypesTest, MessageToJsonWithOptionals) {
     Message msg;
     msg.role = MessageRole::TOOL;
-    msg.contents = {TextContentBlock{"result data"}};
+    msg.content = "result data";
     msg.name = "my_tool";
     msg.toolCallId = "call_123";
 
@@ -55,6 +55,63 @@ TEST(TypesTest, MessageToJsonWithOptionals) {
     EXPECT_EQ(j["content"], "result data");
     EXPECT_EQ(j["name"], "my_tool");
     EXPECT_EQ(j["tool_call_id"], "call_123");
+}
+
+TEST(TypesTest, MessageToJsonWithTextContentBlock) {
+    Message msg;
+    msg.role = MessageRole::USER;
+    msg.content = std::vector<MessageContent>{TextContentBlock{"Hello"}};
+
+    json j = msg.toJson();
+    EXPECT_EQ(j["role"], "user");
+    ASSERT_TRUE(j["content"].is_array());
+    EXPECT_EQ(j["content"].size(), 1u);
+    EXPECT_EQ(j["content"][0]["type"], "text");
+    EXPECT_EQ(j["content"][0]["text"], "Hello");
+}
+
+TEST(TypesTest, MessageToJsonWithImageContentBlock) {
+    Message msg;
+    msg.role = MessageRole::USER;
+    msg.content = std::vector<MessageContent>{ImageURLContentBlock{ImageURL{"https://example.com/img.png"}}};
+
+    json j = msg.toJson();
+    EXPECT_EQ(j["role"], "user");
+    ASSERT_TRUE(j["content"].is_array());
+    EXPECT_EQ(j["content"].size(), 1u);
+    EXPECT_EQ(j["content"][0]["type"], "image_url");
+    EXPECT_EQ(j["content"][0]["image_url"]["url"], "https://example.com/img.png");
+    EXPECT_FALSE(j["content"][0]["image_url"].contains("detail"));
+}
+
+TEST(TypesTest, MessageToJsonWithImageContentBlockDetail) {
+    Message msg;
+    msg.role = MessageRole::USER;
+    msg.content = std::vector<MessageContent>{
+        ImageURLContentBlock{ImageURL{"https://example.com/img.png", "high"}}
+    };
+
+    json j = msg.toJson();
+    EXPECT_EQ(j["content"][0]["image_url"]["url"], "https://example.com/img.png");
+    EXPECT_EQ(j["content"][0]["image_url"]["detail"], "high");
+}
+
+TEST(TypesTest, MessageToJsonWithMixedContent) {
+    Message msg;
+    msg.role = MessageRole::USER;
+    msg.content = std::vector<MessageContent>{
+        TextContentBlock{"Describe this image"},
+        ImageURLContentBlock{ImageURL{"https://example.com/photo.jpg"}}
+    };
+
+    json j = msg.toJson();
+    EXPECT_EQ(j["role"], "user");
+    ASSERT_TRUE(j["content"].is_array());
+    EXPECT_EQ(j["content"].size(), 2u);
+    EXPECT_EQ(j["content"][0]["type"], "text");
+    EXPECT_EQ(j["content"][0]["text"], "Describe this image");
+    EXPECT_EQ(j["content"][1]["type"], "image_url");
+    EXPECT_EQ(j["content"][1]["image_url"]["url"], "https://example.com/photo.jpg");
 }
 
 // ---- ToolParamType Tests ----

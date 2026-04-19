@@ -3,13 +3,11 @@
 
 #include "gaia/agent.h"
 #include "gaia/security.h"
-#include "gaia/types.h"
 
 #include <iostream>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
-#include <type_traits>
 
 namespace gaia {
 
@@ -526,10 +524,6 @@ void Agent::disconnectAllMcp() {
 // ---- Main Execution Loop ----
 
 json Agent::processQuery(const std::string& userInput, int maxSteps) {
-    return this->processQuery({TextContentBlock{userInput}}, maxSteps);
-}
-
-json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSteps) {
     // Snapshot config at start of query for thread-safe consistency throughout.
     AgentConfig cfg;
     {
@@ -568,24 +562,10 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
     // Add user message
     Message userMsg;
     userMsg.role = MessageRole::USER;
-    userMsg.contents = contents;
+    userMsg.content = userInput;
     messages.push_back(userMsg);
 
-    // Create a message of what we are processing
-    std::string consoleMsg;
-    for (const auto& content: contents) {
-        consoleMsg += std::visit([](auto&& arg) {
-            using T = std::decay_t<decltype(arg)>;
-            if constexpr (std::is_same_v<T, TextContentBlock>) {
-                return arg.text;
-            } else if constexpr (std::is_same_v<T, ImageURLContentBlock>) {
-                return "image: " + arg.imageUrl.url;
-            } else {
-                static_assert(false, "Console message is not exhaustive");
-            }
-        }, content) + "\n";
-    }
-    console_->printProcessingStart(consoleMsg, stepsLimit, cfg.modelId);
+    console_->printProcessingStart(userInput, stepsLimit, cfg.modelId);
 
     int stepsTaken = 0;
     std::string finalAnswer;
@@ -604,20 +584,12 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
 
             Message errorMsg;
             errorMsg.role = MessageRole::USER;
-            std::vector<MessageContent> errorContents;
-            // Notify it failed
-            errorContents.push_back(TextContentBlock{
+            errorMsg.content =
                 "TOOL EXECUTION FAILED!\n\n"
                 "Error: " + lastError + "\n\n"
-                "Original tasks:"
-                });
-            // Give contenxt for what it was doing
-            errorContents.insert(errorContents.end(), contents.begin(), contents.end());
-            // And what we expect
-            errorContents.push_back(TextContentBlock{
-                "\n\nPlease analyze the error and try an alternative approach.\n"
-                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})"
-            });
+                "Original task: " + userInput + "\n\n"
+                "Please analyze the error and try an alternative approach.\n"
+                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})";
             messages.push_back(errorMsg);
 
             executionState_ = AgentState::PLANNING;
@@ -655,7 +627,7 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         // Add LLM response to messages
         Message assistantMsg;
         assistantMsg.role = MessageRole::ASSISTANT;
-        assistantMsg.contents = {TextContentBlock{response}};
+        assistantMsg.content = response;
         messages.push_back(assistantMsg);
 
         // Parse response
@@ -682,10 +654,9 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
             if (planIterations_ > cfg.maxPlanIterations) {
                 Message forceMsg;
                 forceMsg.role = MessageRole::USER;
-                forceMsg.contents = {TextContentBlock{
+                forceMsg.content =
                     "You have been planning too long without completing the task. "
-                    "Please provide a final answer now based on the information you have gathered."
-                }};
+                    "Please provide a final answer now based on the information you have gathered.";
                 messages.push_back(forceMsg);
             }
         }
@@ -739,7 +710,7 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
                 resultStr = resultStr.substr(0, 2000) + "\n...[truncated]...\n" +
                             resultStr.substr(resultStr.size() - 1500);
             }
-            toolMsg.contents = {TextContentBlock{resultStr}};
+            toolMsg.content = resultStr;
             messages.push_back(toolMsg);
 
             // Check for error
@@ -777,17 +748,245 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         if (msg.role == MessageRole::TOOL) {
             std::string toolName = msg.name.value_or("tool");
             msg.role = MessageRole::USER;
-            std::vector<MessageContent> resultContents = {
-                TextContentBlock{"[Result from " + toolName + "]"}
-            };
-            resultContents.insert(resultContents.end(), contents.begin(), contents.end());
-            msg.contents = resultContents;
+            msg.content = "[Result from " + toolName + "]: " + std::get<std::string>(msg.content);
             msg.name = std::nullopt;
             msg.toolCallId = std::nullopt;
         }
     }
 
     // Prune to maxHistoryMessages
+    if (cfg.maxHistoryMessages > 0 &&
+        static_cast<int>(messages.size()) > cfg.maxHistoryMessages) {
+        messages.erase(messages.begin(),
+                       messages.begin() + (static_cast<int>(messages.size()) - cfg.maxHistoryMessages));
+    }
+    conversationHistory_ = messages;
+
+    return json{
+        {"result", finalAnswer},
+        {"steps_taken", stepsTaken},
+        {"steps_limit", stepsLimit}
+    };
+}
+
+json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSteps) {
+    AgentConfig cfg;
+    {
+        std::lock_guard<std::mutex> lock(configMutex_);
+        cfg = config_;
+    }
+
+    int stepsLimit = (maxSteps > 0) ? maxSteps : cfg.maxSteps;
+
+    if (!modelEnsured_ && !cfg.modelId.empty()) {
+        try {
+            lemonade_.ensureModelLoaded();
+            modelEnsured_ = true;
+        } catch (const std::exception& e) {
+            console_->printWarning(std::string("Could not ensure model loaded: ") + e.what());
+        }
+    }
+
+    executionState_ = AgentState::PLANNING;
+    currentPlan_ = json();
+    currentStep_ = 0;
+    totalPlanSteps_ = 0;
+    planIterations_ = 0;
+
+    std::vector<Message> messages;
+    for (const auto& msg : conversationHistory_) {
+        messages.push_back(msg);
+    }
+
+    Message userMsg;
+    userMsg.role = MessageRole::USER;
+    userMsg.content = contents;
+    messages.push_back(userMsg);
+
+    std::string consoleMsg;
+    for (const auto& c : contents) {
+        if (auto* text = std::get_if<TextContentBlock>(&c)) {
+            consoleMsg += text->text + "\n";
+        } else if (auto* img = std::get_if<ImageURLContentBlock>(&c)) {
+            consoleMsg += "[image: " + img->imageUrl.url + "]\n";
+        }
+    }
+    console_->printProcessingStart(consoleMsg, stepsLimit, cfg.modelId);
+
+    int stepsTaken = 0;
+    std::string finalAnswer;
+    int errorCount = 0;
+    std::string lastError;
+    std::vector<json> stepResults;
+    std::vector<std::pair<std::string, json>> toolCallHistory;
+
+    while (stepsTaken < stepsLimit && finalAnswer.empty()) {
+        ++stepsTaken;
+        console_->printStepHeader(stepsTaken, stepsLimit);
+
+        if (executionState_ == AgentState::ERROR_RECOVERY) {
+            console_->printStateInfo("ERROR RECOVERY: Handling previous error");
+
+            std::vector<MessageContent> errorBlocks;
+            errorBlocks.push_back(TextContentBlock{
+                "TOOL EXECUTION FAILED!\n\n"
+                "Error: " + lastError + "\n\n"
+                "Original task:\n"
+            });
+            errorBlocks.insert(errorBlocks.end(), contents.begin(), contents.end());
+            errorBlocks.push_back(TextContentBlock{
+                "\n\nPlease analyze the error and try an alternative approach.\n"
+                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})"
+            });
+
+            Message errorMsg;
+            errorMsg.role = MessageRole::USER;
+            errorMsg.content = errorBlocks;
+            messages.push_back(errorMsg);
+
+            executionState_ = AgentState::PLANNING;
+            stepResults.clear();
+        }
+
+        if (!config_.streaming) console_->startProgress("Thinking");
+        std::string response;
+        try {
+            response = callLlm(messages, systemPrompt(), cfg);
+        } catch (const std::exception& e) {
+            if (!config_.streaming) console_->stopProgress();
+            console_->printWarning(std::string("LLM call failed, retrying: ") + e.what());
+
+            if (!config_.streaming) console_->startProgress("Retrying");
+            try {
+                response = callLlm(messages, systemPrompt(), cfg);
+            } catch (const std::exception& e2) {
+                if (!config_.streaming) console_->stopProgress();
+                console_->printError(std::string("LLM error: ") + e2.what());
+                finalAnswer = std::string("Unable to complete task due to LLM error: ") + e2.what();
+                break;
+            }
+        }
+        if (!config_.streaming) console_->stopProgress();
+
+        if (cfg.showPrompts) {
+            console_->printResponse(response, "LLM Response");
+        }
+
+        Message assistantMsg;
+        assistantMsg.role = MessageRole::ASSISTANT;
+        assistantMsg.content = response;
+        messages.push_back(assistantMsg);
+
+        ParsedResponse parsed = parseLlmResponse(response);
+
+        if (!config_.streaming) {
+            console_->printThought(parsed.thought);
+            console_->printGoal(parsed.goal);
+        }
+
+        if (parsed.answer.has_value()) {
+            finalAnswer = parsed.answer.value();
+            if (!config_.streaming) console_->printFinalAnswer(finalAnswer);
+            break;
+        }
+
+        if (parsed.plan.has_value() && parsed.plan.value().is_array()) {
+            ++planIterations_;
+            console_->printPlan(parsed.plan.value(), -1);
+            if (planIterations_ > cfg.maxPlanIterations) {
+                Message forceMsg;
+                forceMsg.role = MessageRole::USER;
+                forceMsg.content =
+                    "You have been planning too long without completing the task. "
+                    "Please provide a final answer now based on the information you have gathered.";
+                messages.push_back(forceMsg);
+            }
+        }
+
+        if (parsed.toolName.has_value()) {
+            std::string toolName = parsed.toolName.value();
+            json toolArgs = parsed.toolArgs.value_or(json::object());
+            if (toolArgs.is_null()) toolArgs = json::object();
+
+            {
+                int repeatThreshold = cfg.maxConsecutiveRepeats - 1;
+                if (static_cast<int>(toolCallHistory.size()) >= repeatThreshold) {
+                    bool allSame = true;
+                    for (size_t i = toolCallHistory.size() - static_cast<size_t>(repeatThreshold);
+                         i < toolCallHistory.size(); ++i) {
+                        if (toolCallHistory[i].first != toolName ||
+                            toolCallHistory[i].second != toolArgs) {
+                            allSame = false;
+                            break;
+                        }
+                    }
+                    if (allSame) {
+                        console_->printWarning("Detected repeated tool call loop. Breaking out.");
+                        finalAnswer = "Task stopped due to repeated tool call loop.";
+                        break;
+                    }
+                }
+            }
+
+            console_->printToolUsage(toolName);
+            console_->prettyPrintJson(toolArgs, "Tool Args");
+            console_->startProgress("Executing " + toolName);
+
+            json toolResult = executeTool(toolName, toolArgs);
+
+            console_->stopProgress();
+            console_->printToolComplete();
+            console_->prettyPrintJson(toolResult, "Tool Result");
+
+            toolCallHistory.emplace_back(toolName, toolArgs);
+            stepResults.push_back(toolResult);
+
+            Message toolMsg;
+            toolMsg.role = MessageRole::TOOL;
+            toolMsg.name = toolName;
+            std::string resultStr = toolResult.dump();
+            if (resultStr.size() > 4000) {
+                resultStr = resultStr.substr(0, 2000) + "\n...[truncated]...\n" +
+                            resultStr.substr(resultStr.size() - 1500);
+            }
+            toolMsg.content = resultStr;
+            messages.push_back(toolMsg);
+
+            bool isError = toolResult.is_object() &&
+                           toolResult.value("status", "") == "error";
+            if (isError) {
+                ++errorCount;
+                lastError = toolResult.value("error", "Unknown error");
+                executionState_ = AgentState::ERROR_RECOVERY;
+            }
+
+            continue;
+        }
+
+        if (!parsed.toolName.has_value() && !parsed.answer.has_value()) {
+            finalAnswer = response;
+            if (!config_.streaming) console_->printFinalAnswer(finalAnswer);
+            break;
+        }
+    }
+
+    if (finalAnswer.empty()) {
+        finalAnswer = "Reached maximum steps limit (" + std::to_string(stepsLimit) + " steps).";
+        console_->printWarning(finalAnswer);
+    }
+
+    console_->printCompletion(stepsTaken, stepsLimit);
+
+    for (auto& msg : messages) {
+        if (msg.role == MessageRole::TOOL) {
+            std::string toolName = msg.name.value_or("tool");
+            msg.role = MessageRole::USER;
+            msg.content = "[Result from " + toolName + "]: " + std::get<std::string>(msg.content);
+            msg.name = std::nullopt;
+            msg.toolCallId = std::nullopt;
+        }
+    }
+
     if (cfg.maxHistoryMessages > 0 &&
         static_cast<int>(messages.size()) > cfg.maxHistoryMessages) {
         messages.erase(messages.begin(),
