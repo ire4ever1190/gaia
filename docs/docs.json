@@ -116,6 +116,12 @@
                       "playbooks/emr-agent/part-2-dashboard",
                       "playbooks/emr-agent/part-3-architecture"
                     ]
+                  },
+                  {
+                    "group": "Custom Installer",
+                    "pages": [
+                      "playbooks/custom-installer/index"
+                    ]
                   }
                 ]
               },
