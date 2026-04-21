@@ -119,6 +119,27 @@ struct Message {
     }
 };
 
+inline std::string extractText(const Message& msg) {
+    if (auto* txt = std::get_if<std::string>(&msg.content)) {
+        return *txt;
+    }
+    auto& blocks = std::get<std::vector<MessageContent>>(msg.content);
+    std::string result;
+    for (const auto& block : blocks) {
+        if (auto* textBlock = std::get_if<TextContentBlock>(&block)) {
+            if (!result.empty()) result += "\n";
+            result += textBlock->text;
+        }
+    }
+    if (result.empty()) {
+        throw std::runtime_error(
+            "TOOL message content contains no extractable text. "
+            "Tool results must be a string or contain TextContentBlock entries. "
+            "Check message with role=" + roleToString(msg.role));
+    }
+    return result;
+}
+
 // ---- Tool Types ----
 
 enum class ToolParamType {

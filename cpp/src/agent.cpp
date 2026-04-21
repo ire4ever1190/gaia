@@ -529,6 +529,7 @@ json Agent::processQuery(const std::string& userInput, int maxSteps) {
 }
 
 json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSteps) {
+    // Snapshot config at start of query for thread-safe consistency throughout.
     AgentConfig cfg;
     {
         std::lock_guard<std::mutex> lock(configMutex_);
@@ -767,7 +768,7 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         if (msg.role == MessageRole::TOOL) {
             std::string toolName = msg.name.value_or("tool");
             msg.role = MessageRole::USER;
-            msg.content = "[Result from " + toolName + "]: " + std::get<std::string>(msg.content);
+            msg.content = "[Result from " + toolName + "]: " + extractText(msg);
             msg.name = std::nullopt;
             msg.toolCallId = std::nullopt;
         }
