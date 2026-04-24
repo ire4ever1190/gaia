@@ -192,8 +192,8 @@ std::string Image::toDataUri() const {
     return uri;
 }
 
-ContentPart Image::toContentPart() const {
-    return ContentPart::makeImageUrl(toDataUri());
+ImageURLContentBlock Image::toContentBlock() const {
+    return ImageURLContentBlock{ImageURL{toDataUri()}};
 }
 
 } // namespace gaia

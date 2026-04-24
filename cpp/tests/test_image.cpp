@@ -201,12 +201,11 @@ TEST(ImageTest, ImageFromFileRejectsSymlink) {
 }
 #endif
 
-// ---- toContentPart / toDataUri (AC-9 helpers) ----
+// ---- toContentBlock / toDataUri (AC-9 helpers) ----
 
-TEST(ImageTest, ImageToContentPartDataUri) {
+TEST(ImageTest, ImageToContentBlockDataUri) {
     std::vector<std::uint8_t> pngBytes = {0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A,'A','B','C','D'};
     Image img = Image::fromBytes(pngBytes);
-    ContentPart p = img.toContentPart();
-    EXPECT_EQ(p.kind, ContentPart::Kind::IMAGE_URL);
-    EXPECT_EQ(p.imageUrl.rfind("data:image/png;base64,", 0), 0u);
+    ImageURLContentBlock ib = img.toContentBlock();
+    EXPECT_EQ(ib.imageUrl.url.rfind("data:image/png;base64,", 0), 0u);
 }

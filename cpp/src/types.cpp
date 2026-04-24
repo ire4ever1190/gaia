@@ -53,52 +53,7 @@ std::string detectImageMimeType(const std::uint8_t* data, std::size_t size) {
     return {};
 }
 
-// ---- ContentPart ----
-
-json ContentPart::toJson() const {
-    json j;
-    if (kind == Kind::TEXT) {
-        j["type"] = "text";
-        j["text"] = text;
-    } else {
-        j["type"] = "image_url";
-        j["image_url"] = {{"url", imageUrl}};
-    }
-    return j;
-}
-
-ContentPart ContentPart::makeText(std::string t) {
-    ContentPart p;
-    p.kind = Kind::TEXT;
-    p.text = std::move(t);
-    return p;
-}
-
-ContentPart ContentPart::makeImageUrl(std::string url) {
-    ContentPart p;
-    p.kind = Kind::IMAGE_URL;
-    p.imageUrl = std::move(url);
-    return p;
-}
-
 // ---- Message ----
-
-json Message::toJson() const {
-    json j;
-    j["role"] = roleToString(role);
-    if (parts.has_value()) {
-        json arr = json::array();
-        for (const auto& p : *parts) {
-            arr.push_back(p.toJson());
-        }
-        j["content"] = arr;
-    } else {
-        j["content"] = content;
-    }
-    if (name.has_value()) j["name"] = name.value();
-    if (toolCallId.has_value()) j["tool_call_id"] = toolCallId.value();
-    return j;
-}
 
 Message Message::fromUser(const std::string& text, const std::vector<Image>& images) {
     Message m;
@@ -107,16 +62,15 @@ Message Message::fromUser(const std::string& text, const std::vector<Image>& ima
         m.content = text;
         return m;
     }
-    std::vector<ContentPart> ps;
-    ps.reserve(images.size() + (text.empty() ? 0 : 1));
+    std::vector<MessageContent> blocks;
+    blocks.reserve(images.size() + (text.empty() ? 0 : 1));
     if (!text.empty()) {
-        ps.push_back(ContentPart::makeText(text));
+        blocks.push_back(TextContentBlock{text});
     }
     for (const auto& img : images) {
-        ps.push_back(img.toContentPart());
+        blocks.push_back(img.toContentBlock());
     }
-    m.content = text; // retained for callers that read .content; JSON uses parts
-    m.parts = std::move(ps);
+    m.content = std::move(blocks);
     return m;
 }
 

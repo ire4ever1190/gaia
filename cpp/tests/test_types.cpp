@@ -302,25 +302,24 @@ TEST(TypesTest, DetectImageMimeFromShortBufferFallsBackToPng) {
     EXPECT_EQ(detectImageMimeType(nullptr, 0), "image/png");
 }
 
-// ---- ContentPart tests ----
+// ---- MessageContent tests ----
 
-TEST(TypesTest, ContentPartTextToJson) {
-    auto p = ContentPart::makeText("hi");
-    json j = p.toJson();
+TEST(TypesTest, MessageContentTextToJson) {
+    TextContentBlock tb{"hi"};
+    json j = tb.toJson();
     EXPECT_EQ(j["type"], "text");
     EXPECT_EQ(j["text"], "hi");
 }
-TEST(TypesTest, ContentPartImageUrlToJson) {
-    auto p = ContentPart::makeImageUrl("data:image/png;base64,abc");
-    json j = p.toJson();
+TEST(TypesTest, MessageContentImageUrlToJson) {
+    ImageURLContentBlock ib{ImageURL{"data:image/png;base64,abc"}};
+    json j = ib.toJson();
     EXPECT_EQ(j["type"], "image_url");
     EXPECT_EQ(j["image_url"]["url"], "data:image/png;base64,abc");
 }
 
-// ---- Message VLM tests (Ttest3) ----
+// ---- Message VLM tests ----
 
 TEST(TypesTest, MessageBackwardCompatStringContent) {
-    // AC-6: text-only message with no parts → content is a JSON string.
     Message msg;
     msg.role = MessageRole::USER;
     msg.content = "hello";
@@ -330,12 +329,11 @@ TEST(TypesTest, MessageBackwardCompatStringContent) {
 }
 
 TEST(TypesTest, MessageToJsonArrayForm) {
-    // AC-7: with parts set, content is a JSON array of parts.
     Message msg;
     msg.role = MessageRole::USER;
-    msg.parts = std::vector<ContentPart>{
-        ContentPart::makeText("look"),
-        ContentPart::makeImageUrl("data:image/png;base64,abc"),
+    msg.content = std::vector<MessageContent>{
+        TextContentBlock{"look"},
+        ImageURLContentBlock{ImageURL{"data:image/png;base64,abc"}},
     };
     json j = msg.toJson();
     ASSERT_TRUE(j["content"].is_array());

@@ -569,49 +569,31 @@ private:
     std::atomic<bool>& flag_;
 };
 
-// Strip any ContentPart{IMAGE_URL} parts, leaving only text. Concatenates
-// all text parts into `content` and clears `parts`. Tool/assistant/system
-// messages are unaffected.
+// Strip ImageURLContentBlock entries from a MessageContent vector,
+// leaving only text. Used before storing in conversation history so
+// base64 data URIs don't accumulate across turns.
 Message stripImageParts(Message msg) {
-    if (!msg.parts.has_value()) return msg;
+    auto* blocks = std::get_if<std::vector<MessageContent>>(&msg.content);
+    if (!blocks) return msg;
     std::string merged;
-    for (const auto& p : *msg.parts) {
-        if (p.kind == ContentPart::Kind::TEXT) {
+    for (const auto& block : *blocks) {
+        if (auto* tb = std::get_if<TextContentBlock>(&block)) {
             if (!merged.empty()) merged.push_back('\n');
-            merged += p.text;
+            merged += tb->text;
         }
     }
     msg.content = std::move(merged);
-    msg.parts.reset();
     return msg;
 }
 
 // Build a summary string describing the user's input for printProcessingStart.
 std::string summarizeUserInput(const std::vector<Message>& userMessages) {
     if (userMessages.empty()) return "";
-    // Use the last user-role message for the banner; if it has parts, extract text.
     for (auto it = userMessages.rbegin(); it != userMessages.rend(); ++it) {
         if (it->role == MessageRole::USER) {
-            if (it->parts.has_value()) {
-                std::string acc;
-                int imgCount = 0;
-                for (const auto& p : *it->parts) {
-                    if (p.kind == ContentPart::Kind::TEXT) {
-                        if (!acc.empty()) acc.push_back(' ');
-                        acc += p.text;
-                    } else {
-                        ++imgCount;
-                    }
-                }
-                if (imgCount > 0) {
-                    acc += " [" + std::to_string(imgCount) + " image(s)]";
-                }
-                return acc;
-            }
             if (auto* txt = std::get_if<std::string>(&it->content)) {
                 return *txt;
             }
-            // MessageContent variant — extract text blocks
             auto* blocks = std::get_if<std::vector<MessageContent>>(&it->content);
             if (blocks) {
                 std::string acc;
@@ -631,8 +613,6 @@ std::string summarizeUserInput(const std::vector<Message>& userMessages) {
             }
         }
     }
-    // No USER-role message found — use the first message's content as a
-    // last resort (cosmetic only; validation above ensures input is non-empty).
     for (const auto& m : userMessages) {
         if (auto* txt = std::get_if<std::string>(&m.content); txt && !txt->empty()) return *txt;
     }
@@ -650,13 +630,12 @@ json Agent::processQueryInternal(const std::vector<Message>& userMessages, int m
         if (auto* txt = std::get_if<std::string>(&m.content); txt && !txt->empty()) {
             anyNonEmpty = true; break;
         }
-        if (auto* blocks = std::get_if<std::vector<MessageContent>>(&m.content); blocks && !blocks->empty()) {
-            anyNonEmpty = true; break;
-        }
-        if (m.parts.has_value()) {
-            for (const auto& part : *m.parts) {
-                if (part.kind == ContentPart::Kind::IMAGE_URL) { anyNonEmpty = true; break; }
-                if (part.kind == ContentPart::Kind::TEXT && !part.text.empty()) {
+        if (auto* blocks = std::get_if<std::vector<MessageContent>>(&m.content)) {
+            for (const auto& block : *blocks) {
+                if (auto* tb = std::get_if<TextContentBlock>(&block); tb && !tb->text.empty()) {
+                    anyNonEmpty = true; break;
+                }
+                if (auto* ib = std::get_if<ImageURLContentBlock>(&block)) {
                     anyNonEmpty = true; break;
                 }
             }
@@ -903,7 +882,7 @@ json Agent::processQueryInternal(const std::vector<Message>& userMessages, int m
             msg.name = std::nullopt;
             msg.toolCallId = std::nullopt;
         }
-        if (msg.parts.has_value()) {
+        if (std::get_if<std::vector<MessageContent>>(&msg.content)) {
             msg = stripImageParts(std::move(msg));
         }
     }
