@@ -306,7 +306,8 @@ std::string Agent::callLlm(const std::vector<Message>& messages, const std::stri
                 const json responseJson = json::parse(rawResponse);
                 if (responseJson.contains("choices") && !responseJson["choices"].empty()) {
                     const auto& choice = responseJson["choices"][0];
-                    if (choice.contains("message") && choice["message"].contains("content")) {
+                    if (choice.contains("message") && choice["message"].contains("content")
+                        && choice["message"]["content"].is_string()) {
                         return choice["message"]["content"].get<std::string>();
                     }
                 }
@@ -325,7 +326,8 @@ std::string Agent::callLlm(const std::vector<Message>& messages, const std::stri
 
         if (responseJson.contains("choices") && !responseJson["choices"].empty()) {
             auto& choice = responseJson["choices"][0];
-            if (choice.contains("message") && choice["message"].contains("content")) {
+            if (choice.contains("message") && choice["message"].contains("content")
+                && choice["message"]["content"].is_string()) {
                 return choice["message"]["content"].get<std::string>();
             }
         }
@@ -524,11 +526,151 @@ void Agent::disconnectAllMcp() {
 
 // ---- Main Execution Loop ----
 
+// Public overloads delegate to processQueryInternal as their FIRST action.
+// No partial delegation. No direct conversationHistory_ writes outside internal.
+
 json Agent::processQuery(const std::string& userInput, int maxSteps) {
     return processQuery({TextContentBlock{userInput}}, maxSteps);
 }
 
 json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSteps) {
+    Message m;
+    m.role = MessageRole::USER;
+    m.content = contents;
+    return processQueryInternal({m}, maxSteps);
+}
+
+json Agent::processQuery(const std::string& userInput,
+                         const std::vector<Image>& images,
+                         int maxSteps) {
+    Message m = Message::fromUser(userInput, images);
+    return processQueryInternal({m}, maxSteps);
+}
+
+json Agent::processQuery(const std::vector<Message>& messages, int maxSteps) {
+    return processQueryInternal(messages, maxSteps);
+}
+
+// RAII helper: atomic flip-flop. Flips inFlight_ true via
+// compare_exchange_strong; restores on scope exit. Throws if already set.
+namespace {
+class InFlightGuard {
+public:
+    explicit InFlightGuard(std::atomic<bool>& flag) : flag_(flag) {
+        bool expected = false;
+        if (!flag_.compare_exchange_strong(expected, true)) {
+            throw std::runtime_error("Agent::processQuery is not re-entrant");
+        }
+    }
+    ~InFlightGuard() { flag_.store(false); }
+    InFlightGuard(const InFlightGuard&) = delete;
+    InFlightGuard& operator=(const InFlightGuard&) = delete;
+private:
+    std::atomic<bool>& flag_;
+};
+
+// Strip any ContentPart{IMAGE_URL} parts, leaving only text. Concatenates
+// all text parts into `content` and clears `parts`. Tool/assistant/system
+// messages are unaffected.
+Message stripImageParts(Message msg) {
+    if (!msg.parts.has_value()) return msg;
+    std::string merged;
+    for (const auto& p : *msg.parts) {
+        if (p.kind == ContentPart::Kind::TEXT) {
+            if (!merged.empty()) merged.push_back('\n');
+            merged += p.text;
+        }
+    }
+    msg.content = std::move(merged);
+    msg.parts.reset();
+    return msg;
+}
+
+// Build a summary string describing the user's input for printProcessingStart.
+std::string summarizeUserInput(const std::vector<Message>& userMessages) {
+    if (userMessages.empty()) return "";
+    // Use the last user-role message for the banner; if it has parts, extract text.
+    for (auto it = userMessages.rbegin(); it != userMessages.rend(); ++it) {
+        if (it->role == MessageRole::USER) {
+            if (it->parts.has_value()) {
+                std::string acc;
+                int imgCount = 0;
+                for (const auto& p : *it->parts) {
+                    if (p.kind == ContentPart::Kind::TEXT) {
+                        if (!acc.empty()) acc.push_back(' ');
+                        acc += p.text;
+                    } else {
+                        ++imgCount;
+                    }
+                }
+                if (imgCount > 0) {
+                    acc += " [" + std::to_string(imgCount) + " image(s)]";
+                }
+                return acc;
+            }
+            if (auto* txt = std::get_if<std::string>(&it->content)) {
+                return *txt;
+            }
+            // MessageContent variant — extract text blocks
+            auto* blocks = std::get_if<std::vector<MessageContent>>(&it->content);
+            if (blocks) {
+                std::string acc;
+                int imgCount = 0;
+                for (const auto& block : *blocks) {
+                    if (auto* tb = std::get_if<TextContentBlock>(&block)) {
+                        if (!acc.empty()) acc.push_back(' ');
+                        acc += tb->text;
+                    } else if (auto* ib = std::get_if<ImageURLContentBlock>(&block)) {
+                        ++imgCount;
+                    }
+                }
+                if (imgCount > 0) {
+                    acc += " [" + std::to_string(imgCount) + " image(s)]";
+                }
+                return acc;
+            }
+        }
+    }
+    // No USER-role message found — use the first message's content as a
+    // last resort (cosmetic only; validation above ensures input is non-empty).
+    for (const auto& m : userMessages) {
+        if (auto* txt = std::get_if<std::string>(&m.content); txt && !txt->empty()) return *txt;
+    }
+    return "";
+}
+} // namespace
+
+json Agent::processQueryInternal(const std::vector<Message>& userMessages, int maxSteps) {
+    // Empty-input validation FIRST — no HTTP call, no /load.
+    if (userMessages.empty()) {
+        throw std::invalid_argument("Agent::processQuery: empty message list");
+    }
+    bool anyNonEmpty = false;
+    for (const auto& m : userMessages) {
+        if (auto* txt = std::get_if<std::string>(&m.content); txt && !txt->empty()) {
+            anyNonEmpty = true; break;
+        }
+        if (auto* blocks = std::get_if<std::vector<MessageContent>>(&m.content); blocks && !blocks->empty()) {
+            anyNonEmpty = true; break;
+        }
+        if (m.parts.has_value()) {
+            for (const auto& part : *m.parts) {
+                if (part.kind == ContentPart::Kind::IMAGE_URL) { anyNonEmpty = true; break; }
+                if (part.kind == ContentPart::Kind::TEXT && !part.text.empty()) {
+                    anyNonEmpty = true; break;
+                }
+            }
+        }
+        if (anyNonEmpty) break;
+    }
+    if (!anyNonEmpty) {
+        throw std::invalid_argument("Agent::processQuery: all user messages are empty");
+    }
+
+    // Re-entrancy guard (RAII — releases on any exit path incl. exceptions).
+    InFlightGuard guard(inFlight_);
+
+
     // Snapshot config at start of query for thread-safe consistency throughout.
     AgentConfig cfg;
     {
@@ -564,21 +706,13 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         messages.push_back(msg);
     }
 
-    // Add user message
-    Message userMsg;
-    userMsg.role = MessageRole::USER;
-    userMsg.content = contents;
-    messages.push_back(userMsg);
-
-    std::string consoleMsg;
-    for (const auto& c : contents) {
-        if (auto* text = std::get_if<TextContentBlock>(&c)) {
-            consoleMsg += text->text + "\n";
-        } else if (auto* img = std::get_if<ImageURLContentBlock>(&c)) {
-            consoleMsg += "[image: " + img->imageUrl.url + "]\n";
-        }
+    // Append caller-supplied user messages verbatim (may contain image parts).
+    for (const auto& m : userMessages) {
+        messages.push_back(m);
     }
-    console_->printProcessingStart(consoleMsg, stepsLimit, cfg.modelId);
+
+    const std::string userInput = summarizeUserInput(userMessages);
+    console_->printProcessingStart(userInput, stepsLimit, cfg.modelId);
 
     int stepsTaken = 0;
     std::string finalAnswer;
@@ -595,21 +729,16 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
         if (executionState_ == AgentState::ERROR_RECOVERY) {
             console_->printStateInfo("ERROR RECOVERY: Handling previous error");
 
-            std::vector<MessageContent> errorBlocks;
-            errorBlocks.push_back(TextContentBlock{
+            std::string errorText =
                 "TOOL EXECUTION FAILED!\n\n"
                 "Error: " + lastError + "\n\n"
-                "Original task:\n"
-            });
-            errorBlocks.insert(errorBlocks.end(), contents.begin(), contents.end());
-            errorBlocks.push_back(TextContentBlock{
-                "\n\nPlease analyze the error and try an alternative approach.\n"
-                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})"
-            });
+                "Original task:\n" + userInput + "\n\n"
+                "Please analyze the error and try an alternative approach.\n"
+                R"(Respond with {"thought": "...", "goal": "...", "tool": "...", "tool_args": {...}})";
 
             Message errorMsg;
             errorMsg.role = MessageRole::USER;
-            errorMsg.content = errorBlocks;
+            errorMsg.content = errorText;
             messages.push_back(errorMsg);
 
             executionState_ = AgentState::PLANNING;
@@ -764,6 +893,8 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
     // Store conversation history for session persistence.
     // Convert TOOL messages to USER messages so the LLM server can replay
     // them without requiring tool_call_id / tool_calls pairing.
+    // Strip image parts (base64 data URIs) so they don't accumulate in
+    // history across turns — text-only retention by contract.
     for (auto& msg : messages) {
         if (msg.role == MessageRole::TOOL) {
             std::string toolName = msg.name.value_or("tool");
@@ -771,6 +902,9 @@ json Agent::processQuery(const std::vector<MessageContent>& contents, int maxSte
             msg.content = "[Result from " + toolName + "]: " + extractText(msg);
             msg.name = std::nullopt;
             msg.toolCallId = std::nullopt;
+        }
+        if (msg.parts.has_value()) {
+            msg = stripImageParts(std::move(msg));
         }
     }
 
